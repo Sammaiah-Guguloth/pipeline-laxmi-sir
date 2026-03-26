@@ -1,16 +1,12 @@
 pipeline {
     agent any
 
-    environment {
-        DOCKER_IMAGE = "sammaiah1919/my-k8s-app"
-        KUBECONFIG = "/home/user/.kube/config"
-    }
-
     stages {
 
         stage('Checkout from GitHub') {
             steps {
-                git branch: 'master',
+                deleteDir()   // 🔥 ensures no stale code
+                git branch: 'main',
                     url: 'https://github.com/Sammaiah-Guguloth/pipeline-laxmi-sir.git'
             }
         }
@@ -24,37 +20,38 @@ pipeline {
         stage('Build Docker Image') {
             steps {
                 sh '''
-                docker build -t my-k8s-app:${BUILD_NUMBER} .
+                docker build -t my-k8s-node-app:${BUILD_NUMBER} .
 
-                docker tag my-k8s-app:${BUILD_NUMBER} $DOCKER_IMAGE:latest
-                docker tag my-k8s-app:${BUILD_NUMBER} $DOCKER_IMAGE:${BUILD_NUMBER}
+                docker tag my-k8s-node-app:${BUILD_NUMBER} sammaiah1919/my-k8s-node-app:${BUILD_NUMBER}
                 '''
             }
         }
 
         stage('Push Docker Image') {
             steps {
-                sh '''
-                docker push $DOCKER_IMAGE:latest
-                docker push $DOCKER_IMAGE:${BUILD_NUMBER}
-                '''
+                withCredentials([usernamePassword(
+                    credentialsId: 'dockerHubCredentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh '''
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+
+                    docker push sammaiah1919/my-k8s-node-app:${BUILD_NUMBER}
+
+                    docker logout
+                    '''
+                }
             }
         }
 
-        stage('Verify Kubernetes Cluster') {
+        stage('Start Minikube if not running') {
             steps {
                 sh '''
-                kubectl --kubeconfig=$KUBECONFIG get nodes
-                '''
-            }
-        }
-
-        
-
-        stage('Load image to kubernates') {
-            steps {
-                sh '''
-                    minikube image load sammaiah1919/my-k8s-app:latest
+                if ! minikube status | grep -q "apiserver: Running"; then
+                    echo "Starting Minikube..."
+                    minikube start --driver=docker
+                fi
                 '''
             }
         }
@@ -62,8 +59,18 @@ pipeline {
         stage('Deploy to Kubernetes') {
             steps {
                 sh '''
-                kubectl --kubeconfig=$KUBECONFIG apply -f k8s/deployment.yaml
-                kubectl --kubeconfig=$KUBECONFIG apply -f k8s/service.yaml
+                # Load image into Minikube
+                minikube image load sammaiah1919/my-k8s-node-app:${BUILD_NUMBER}
+
+                # Update deployment image
+                sed -i "s|image:.*|image: sammaiah1919/my-k8s-node-app:${BUILD_NUMBER}|g" k8s/deployment.yaml
+
+                # Apply manifests
+                kubectl apply -f k8s/deployment.yaml
+                kubectl apply -f k8s/service.yaml
+
+                # Wait for pods to be ready 🔥
+                kubectl rollout status deployment/my-k8s-app-deployment
                 '''
             }
         }
@@ -71,7 +78,13 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 sh '''
-                minikube service my-k8s-app-service
+                echo "Fetching service URL..."
+                URL=$(minikube service my-k8s-app-service --url)
+
+                echo "Service URL: $URL"
+
+                echo "Checking application health..."
+                curl -f $URL || exit 1
                 '''
             }
         }
